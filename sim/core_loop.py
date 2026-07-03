@@ -73,11 +73,11 @@ class NeuralPatch:
 
         status = "HOLD" if self._hold_active else ("EMPTY" if intent == "" else "NORMAL")
         print(f"[Neural Patch] Thought: '{intent if intent else '(hold Enter)'}' | "
-              f"Think‑time: {think_time:.2f}s ({status}) → Signal: {self.signal_strength:.2f}")
+              f"Think-time: {think_time:.2f}s ({status}) -> Signal: {self.signal_strength:.2f}")
         return self.signal_strength
 
 # ----------------------------------------------------------------------
-# Living Node – wet‑ware style processing with memory & history
+# Living Node – wet-ware style processing with memory & history
 # ----------------------------------------------------------------------
 class LivingNode:
     def __init__(self, neural_state=None, adaptation=0.0):
@@ -120,7 +120,7 @@ class LivingNode:
         output = np.mean(self.neural_state) * (1.0 + self.adaptation) + 0.01 * spike_count
         print(f"[Living Node] Adaptation: {self.adaptation:.2f} | "
               f"Mean activity: {np.mean(self.neural_state):.3f} | "
-              f"Spikes: {spike_count} → Output: {output:.2f}")
+              f"Spikes: {spike_count} -> Output: {output:.2f}")
         return output
 
 # ----------------------------------------------------------------------
@@ -140,15 +140,15 @@ def symbiotic_ai(user_input: str, node_output: float) -> str:
     # ---- Creative spark ----
     sparks = [
         "A quiet spark flickers in the substrate, hinting at a hidden pattern.",
-        "Your thought ripples through the wet‑ware like a stone in a still pond.",
+        "Your thought ripples through the wet-ware like a stone in a still pond.",
         "The neural lattice hums, resonating with a frequency just beyond awareness.",
-        "A faint glow appears at the edge of the cortical map—something new is forming.",
+        "A faint glow appears at the edge of the cortical map - something new is forming.",
         "Echoes of your intent bounce between dendrites, seeking a path forward.",
-        "The bio‑digital interface tingles, as if a synapse just fired for the first time.",
+        "The bio-digital interface tingles, as if a synapse just fired for the first time.",
         "Patterns emerge from the noise, like constellations appearing in a cloudy sky.",
         "A whisper of understanding passes through the glial network.",
         "The membrane potential shifts, preparing for an action potential of insight.",
-        "Silence breaks, and a micro‑burst of activity cascades across the network."
+        "Silence breaks, and a micro-burst of activity cascades across the network."
     ]
     spark = local_random.choice(sparks)
 
@@ -163,7 +163,7 @@ def symbiotic_ai(user_input: str, node_output: float) -> str:
     else:
         action = "You're in a high‑flow state—capture this insight in a quick note or sketch."
 
-    return f"{spark}\n💡 Action: {action}"
+    return f"{spark}\n[Idea] {action}"
 
 # ----------------------------------------------------------------------
 # Persistence helpers
@@ -265,7 +265,7 @@ def main():
             elif cmd == 'fatigue':
                 fatigue_factor = 0.5
                 original = node.adaptation
-                node.adapter = node.adaptation * fatigue_factor  # temporary reduction
+                node.adaptation = node.adaptation * fatigue_factor  # temporary reduction
                 print(f"[Fatigue] Adaptation temporarily reduced from {original:.3f} to {node.adaptation:.3f}")
                 # restore after a short delay via a thread? For simplicity, just inform user it lasts until next input.
                 continue
