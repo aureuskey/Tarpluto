@@ -1,0 +1,4 @@
+memory.json
+demos/simulation_*.png
+venv/
+__pycache__/
