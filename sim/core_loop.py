@@ -1,5 +1,5 @@
 # Tarpluto - core simulation loop
-# Neural Patch (think-time -> signal) -> Living Node (1000 spiking neurons) -> output
+# Neural Patch (think-time or MyoWare sensor -> signal) -> Living Node (1000 spiking neurons) -> output
 import argparse
 import json
 import os
@@ -128,16 +128,31 @@ def main():
     ap.add_argument('--memory', action='store_true', help=f'load/save state in {MEMORY_FILE}')
     ap.add_argument('--ai', action='store_true', help='print one AI line per thought (on in --demo)')
     ap.add_argument('--figure', default=FIGURE_FILE, help='where to save the figure')
+    ap.add_argument('--source', choices=['thinktime', 'serial', 'fake'], default='thinktime',
+                    help='Patch signal source (serial = MyoWare via Arduino)')
+    ap.add_argument('--port', help='serial port, e.g. /dev/ttyACM0 or COM3')
+    ap.add_argument('--baud', type=int, default=115200)
     args = ap.parse_args()
     use_memory = args.memory and not args.demo
     if args.demo:
         np.random.seed(42)
 
     state, adaptation = load_memory() if use_memory else (None, 0.0)
-    patch, node = NeuralPatch(), LivingNode(state, adaptation)
+    node = LivingNode(state, adaptation)
+    if args.source == 'thinktime':
+        patch = NeuralPatch()
+    else:
+        from sensor import SensorPatch, SerialStream, FakeStream
+        if args.source == 'serial' and not args.port:
+            ap.error('--source serial needs --port')
+        stream = SerialStream(args.port, args.baud) if args.source == 'serial' else FakeStream()
+        patch = SensorPatch(stream)
 
     print("\n=== Tarpluto ===")
-    print("Type a thought. Take longer to think -> stronger signal -> more spikes.")
+    if args.source == 'thinktime':
+        print("Type a thought. Take longer to think -> stronger signal -> more spikes.")
+    else:
+        print("Type a thought, flex while you think, press Enter. Peak flex in the last second = signal.")
     print("Commands: status, quit\n")
     try:
         while True:
