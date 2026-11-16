@@ -10,7 +10,7 @@ Today the Patch is a proxy: the time you take to think before pressing Enter bec
 ```bash
 git clone https://github.com/aureuskey/Tarpluto
 cd Tarpluto
-pip install -r requirements.txt && python sim/core_loop.py --demo
+pip install -r requirements.txt && python3 sim/core_loop.py --demo
 ```
 
 Type a few thoughts, some fast and some slow, then `quit`. Commands: `status`, `quit`.
