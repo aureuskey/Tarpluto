@@ -1,4 +1,4 @@
-# Tarpluto - core simulation loop
+# Tarpluto - core simulation loop v0.10
 # Neural Patch (think-time or MyoWare sensor -> signal) -> Living Node (1000 spiking neurons) -> output
 import argparse
 import json
@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
+VERSION = "v0.10"
 N_NEURONS = 1000
 MEMORY_FILE = 'memory.json'
 FIGURE_FILE = os.path.join('demos', 'tarpluto_loop.png')
@@ -105,7 +106,7 @@ def plot_loop(node, path=FIGURE_FILE, show=True):
     ax1.plot(steps, node.signals, 'o-')
     ax1.set_ylim(0, 1.05)
     ax1.set_ylabel('Patch signal')
-    ax1.set_title('Tarpluto: Neural Patch signal -> Living Node spikes')
+    ax1.set_title(f'Tarpluto {VERSION}: Neural Patch signal -> Living Node spikes')
     if node.spike_events:
         s, n = zip(*node.spike_events)
         ax2.scatter(s, n, s=2, c='black', marker='.')
@@ -123,23 +124,38 @@ def plot_loop(node, path=FIGURE_FILE, show=True):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Tarpluto Patch -> Node simulation')
+    ap = argparse.ArgumentParser(description='Tarpluto v0.10 Patch -> Node simulation')
     ap.add_argument('--demo', action='store_true', help='fixed seed, fresh 1000-neuron start')
     ap.add_argument('--memory', action='store_true', help=f'load/save state in {MEMORY_FILE}')
     ap.add_argument('--ai', action='store_true', help='print one AI line per thought (on in --demo)')
     ap.add_argument('--figure', default=FIGURE_FILE, help='where to save the figure')
-    ap.add_argument('--source', choices=['thinktime', 'serial', 'fake'], default='thinktime',
-                    help='Patch signal source (serial = MyoWare via Arduino)')
+    ap.add_argument('--source', choices=['thinktime', 'serial', 'fake', 'fake4ch'], default='thinktime',
+                    help='Patch signal source (serial = MyoWare via Arduino; fake4ch = synthetic 4-ch decoder)')
     ap.add_argument('--port', help='serial port, e.g. /dev/ttyACM0 or COM3')
     ap.add_argument('--baud', type=int, default=115200)
+    ap.add_argument('--decode', action='store_true',
+                    help='decode synthetic 4-channel silent-command trials; type y before a command acts')
     args = ap.parse_args()
+    if args.source == 'fake4ch':
+        args.decode = True
+    if args.decode and args.source in ('serial', 'fake'):
+        ap.error('--decode uses the synthetic 4-channel EMG source; pass --decode or --source fake4ch')
     use_memory = args.memory and not args.demo
     if args.demo:
         np.random.seed(42)
 
     state, adaptation = load_memory() if use_memory else (None, 0.0)
     node = LivingNode(state, adaptation)
-    if args.source == 'thinktime':
+    decoder = online_emg = None
+    if args.decode:
+        from decode import (
+            N_TRAIN, SYNTHETIC_NOTE, build_decoder, confirm_act, featurize, synthetic_rms_signal,
+        )
+        from sensor import EMG_SEED, ONLINE_SEED, SILENT_COMMANDS, SyntheticJawEMG
+        decoder = build_decoder()
+        online_emg = SyntheticJawEMG(seed=ONLINE_SEED)
+        patch = None
+    elif args.source == 'thinktime':
         patch = NeuralPatch()
     else:
         from sensor import SensorPatch, SerialStream, FakeStream
@@ -148,8 +164,13 @@ def main():
         stream = SerialStream(args.port, args.baud) if args.source == 'serial' else FakeStream()
         patch = SensorPatch(stream)
 
-    print("\n=== Tarpluto ===")
-    if args.source == 'thinktime':
+    print(f"\n=== Tarpluto {VERSION} ===")
+    if args.decode:
+        print(f"[Decode] {SYNTHETIC_NOTE}")
+        print(f"[Decode] Nearest centroid trained on {N_TRAIN} synthetic trials per command, seed {EMG_SEED}.")
+        print("Type yes, no, help, water, or stop. That word selects a simulated jaw/face EMG pattern.")
+        print("The predicted command acts only after you type y.")
+    elif args.source == 'thinktime':
         print("Type a thought. Take longer to think -> stronger signal -> more spikes.")
     else:
         print("Type a thought, flex while you think, press Enter. Peak flex in the last second = signal.")
@@ -170,8 +191,28 @@ def main():
                 continue
             if not text:
                 continue
-            signal = patch.read_thought(text, think_time)
-            _, spikes = node.process(signal)
+            if args.decode:
+                label = text.lower()
+                if label not in SILENT_COMMANDS:
+                    names = ', '.join(SILENT_COMMANDS)
+                    print(f"[Decode] '{text}' is not a synthetic command. Choose one of: {names}.\n")
+                    continue
+                trial = online_emg.trial(label)
+                pred = str(decoder.predict(featurize(trial)[None, :])[0])
+                print(f"[Decode] synthesized '{label}' | predicted '{pred}'")
+                try:
+                    answer = input(f"Act on decoded command '{pred}'? Type y to confirm: ")
+                except EOFError:
+                    break
+                if not confirm_act(answer):
+                    print("[Decode] Not confirmed. No command acted.\n")
+                    continue
+                signal = synthetic_rms_signal(trial)
+                print(f"[Neural Patch] '{pred}' | synthetic 4-ch RMS -> signal {signal:.2f}")
+                _, spikes = node.process(signal)
+            else:
+                signal = patch.read_thought(text, think_time)
+                _, spikes = node.process(signal)
             if args.ai or args.demo:
                 print(f"[AI] {ai_line(signal, spikes)}")
             print()
