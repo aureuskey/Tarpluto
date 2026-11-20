@@ -6,19 +6,27 @@ import sys
 import tempfile
 import unittest
 
+os.environ.setdefault('MPLBACKEND', 'Agg')
+
 import numpy as np
 
 from decode import (
+    N_RECAL,
     N_TEST,
     N_TRAIN,
     SYNTHETIC_NOTE,
+    _split_recal_prefix,
     build_decoder,
     confirm_act,
     evaluate,
+    evaluate_sessions,
     featurize,
     feature_names,
     format_report,
+    format_session_report,
     n_features,
+    session_effects,
+    session_generator_seed,
     window_starts,
 )
 from sensor import (
@@ -28,6 +36,7 @@ from sensor import (
     N_SAMPLES,
     ONLINE_SEED,
     SILENT_COMMANDS,
+    SessionEffects,
     SyntheticJawEMG,
 )
 
@@ -113,6 +122,31 @@ class ClassifierTests(unittest.TestCase):
         self.assertIn(SYNTHETIC_NOTE, report)
         self.assertIn(f"Accuracy: {first['n_correct']}/{first['n_test']}", report)
 
+    def test_update_centroids_keeps_scaler_and_can_change_the_label(self):
+        from decode import NearestCentroid
+        X = np.array([
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 0.0],
+        ])
+        y = np.array(['a', 'a', 'b', 'b'])
+        clf = NearestCentroid().fit(X, y)
+        point = np.array([[6.5, 0.0]])
+        self.assertEqual(str(clf.predict(point)[0]), 'b')
+        fresh = clf.copy()
+        mean, scale = clf.mean_.copy(), clf.scale_.copy()
+        fresh.update_centroids(
+            np.array([[6.0, 0.0], [6.0, 0.0], [10.0, 0.0], [10.0, 0.0]]),
+            np.array(['a', 'a', 'b', 'b']),
+        )
+        self.assertEqual(str(fresh.predict(point)[0]), 'a')
+        self.assertEqual(str(clf.predict(point)[0]), 'b')
+        self.assertTrue(np.array_equal(fresh.mean_, mean))
+        self.assertTrue(np.array_equal(fresh.scale_, scale))
+        with self.assertRaises(ValueError):
+            clf.copy().update_centroids(np.array([[6.0, 0.0]]), np.array(['a']))
+
     def test_demo_decoder_matches_eval_training_seed(self):
         result = evaluate(n_train=N_TRAIN, n_test=1)
         demo = build_decoder()
@@ -128,7 +162,7 @@ class ClassifierTests(unittest.TestCase):
 
 
 class VersionTests(unittest.TestCase):
-    def test_docs_say_v010_and_not_old_versions(self):
+    def test_docs_say_v011_and_not_old_versions(self):
         paths = [
             os.path.join(ROOT, 'sim', 'core_loop.py'),
             os.path.join(ROOT, 'README.md'),
@@ -143,11 +177,16 @@ class VersionTests(unittest.TestCase):
             self.assertNotIn('v0.4', text)
             self.assertNotIn('v0.8', text)
         core, readme, roadmap, changelog = texts
-        self.assertTrue(core.startswith('# Tarpluto - core simulation loop v0.10\n'))
-        self.assertIn('VERSION = "v0.10"', core)
+        self.assertTrue(core.startswith('# Tarpluto - core simulation loop v0.11\n'))
+        self.assertIn('VERSION = "v0.11"', core)
+        self.assertNotIn('v0.10', core)
         self.assertIn('Tarpluto {VERSION}', core)
-        self.assertIn('v0.10', readme)
-        self.assertIn('v0.10', roadmap)
+        self.assertIn('v0.11', readme)
+        self.assertIn('v0.11', roadmap)
+        self.assertIn('synthetic data, simulated sessions', readme.lower())
+        self.assertIn('synthetic data, simulated sessions', roadmap.lower())
+        self.assertIn('## v0.11', changelog)
+        self.assertIn('synthetic data, simulated sessions', changelog.lower())
         self.assertIn(SYNTHETIC_NOTE, readme)
         self.assertIn(SYNTHETIC_NOTE, roadmap)
         self.assertIn(SYNTHETIC_NOTE, changelog)
@@ -178,7 +217,7 @@ class LoopTests(unittest.TestCase):
     def test_demo_still_runs_without_decoding(self):
         proc = _run_loop(['--demo'], 'quit\n', self.fig)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('=== Tarpluto v0.10 ===', proc.stdout)
+        self.assertIn('=== Tarpluto v0.11 ===', proc.stdout)
         self.assertIn('Type a thought. Take longer to think', proc.stdout)
         self.assertNotIn('[Decode]', proc.stdout)
         self.assertNotIn('Type y to confirm', proc.stdout)
@@ -237,6 +276,161 @@ class EvalScriptTests(unittest.TestCase):
             self.assertIn(f'Saved confusion matrix to {out}', proc.stdout)
             with open(out, 'rb') as f:
                 self.assertEqual(f.read(8), b'\x89PNG\r\n\x1a\n')
+
+    def test_sessions_script_prints_report_and_small_png(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, 'sessions.png')
+            env = os.environ.copy()
+            env['MPLBACKEND'] = 'Agg'
+            proc = subprocess.run(
+                [
+                    sys.executable, os.path.join(ROOT, 'sim', 'decode_eval.py'),
+                    '--sessions', '3', '--out', out,
+                ],
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                env=env,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = format_session_report(evaluate_sessions(n_sessions=3))
+            self.assertIn(report, proc.stdout)
+            self.assertIn('synthetic data, simulated sessions', proc.stdout)
+            self.assertIn(f'Saved session accuracy plot to {out}', proc.stdout)
+            self.assertLess(os.path.getsize(out), 200_000)
+            with open(out, 'rb') as f:
+                self.assertEqual(f.read(8), b'\x89PNG\r\n\x1a\n')
+
+
+class PerturbationTests(unittest.TestCase):
+    def test_zero_session_matches_the_plain_generator(self):
+        plain = SyntheticJawEMG(seed=EMG_SEED)
+        wrapped = SyntheticJawEMG(seed=EMG_SEED, session=SessionEffects(seed=123))
+        left, left_y = plain.collect(3)
+        right, right_y = wrapped.collect(3)
+        self.assertEqual(left_y, right_y)
+        for a, b in zip(left, right):
+            self.assertTrue(np.array_equal(a, b))
+
+    def test_electrode_shift_remixes_and_partially_mixes(self):
+        effects = SessionEffects(seed=5, electrode_shift=0.7)
+        off_diag = ~np.eye(N_CHANNELS, dtype=bool)
+        self.assertTrue(np.all(effects.mix[off_diag] > 0.0))
+        for i in range(N_CHANNELS):
+            column = np.delete(effects.mix[:, i], i)
+            self.assertGreater(float(np.max(column) - np.min(column)), 1e-6)
+        hot = np.zeros((N_SAMPLES, N_CHANNELS))
+        hot[:, 0] = 1.0
+        mixed = effects.apply(hot, trial_index=0, n_trials=1)
+        self.assertGreater(float(np.sum(mixed[:, 1:] ** 2)), 0.05)
+        again = SessionEffects(seed=5, electrode_shift=0.7).apply(hot, 0, 1)
+        self.assertTrue(np.allclose(mixed, again))
+        self.assertFalse(np.allclose(
+            effects.mix, SessionEffects(seed=6, electrode_shift=0.7).mix,
+        ))
+
+    def test_amplitude_drift_is_a_fixed_per_channel_gain(self):
+        effects = SessionEffects(seed=8, amplitude_drift=0.25)
+        self.assertFalse(np.allclose(effects.gains, np.ones(N_CHANNELS)))
+        self.assertGreater(float(np.std(effects.gains)), 0.0)
+        ones = np.ones((12, N_CHANNELS))
+        self.assertTrue(np.allclose(effects.apply(ones, 0, 1), effects.gains))
+        hot = np.zeros((12, N_CHANNELS))
+        hot[:, 2] = 3.0
+        scaled = effects.apply(hot, 0, 1)
+        self.assertTrue(np.allclose(scaled[:, 2], 3.0 * effects.gains[2]))
+        self.assertTrue(np.allclose(scaled[:, [0, 1, 3]], 0.0))
+        other = SessionEffects(seed=9, amplitude_drift=0.25).gains
+        self.assertFalse(np.allclose(effects.gains, other))
+
+    def test_fatigue_drop_scales_later_trials_only(self):
+        drop = 0.4
+        plain = SyntheticJawEMG(seed=9)
+        pert = SyntheticJawEMG(seed=9, session=SessionEffects(seed=1, fatigue_drop=drop))
+        base, _ = plain.collect(5)
+        got, _ = pert.collect(5)
+        self.assertTrue(np.array_equal(got[0], base[0]))
+        self.assertTrue(np.allclose(got[4], base[4] * (1.0 - drop)))
+
+    def test_fatigue_spectral_changes_zero_crossings(self):
+        from decode import ZC_DEADZONE, _zero_crossings
+        effects = SessionEffects(seed=2, fatigue_spectral=0.85)
+        base = SyntheticJawEMG(seed=4).trial('stop')
+        early = effects.apply(base, trial_index=0, n_trials=10)
+        late = effects.apply(base, trial_index=9, n_trials=10)
+        self.assertTrue(np.array_equal(early, base))
+        zc = lambda trial: float(_zero_crossings(trial, ZC_DEADZONE).sum())
+        self.assertGreater(zc(early), zc(late))
+        scale = float(np.dot(late.ravel(), early.ravel()) / np.dot(early.ravel(), early.ravel()))
+        residual = late - scale * early
+        self.assertGreater(float(np.sqrt(np.mean(residual ** 2))), 1.0)
+
+    def test_rejects_bad_strengths(self):
+        with self.assertRaises(ValueError):
+            SessionEffects(seed=1, electrode_shift=1.2)
+        with self.assertRaises(ValueError):
+            SessionEffects(seed=1, amplitude_drift=-0.1)
+        with self.assertRaises(ValueError):
+            SessionEffects(seed=1, fatigue_drop=-0.1)
+        with self.assertRaises(ValueError):
+            SessionEffects(seed=1, fatigue_spectral=1.5)
+
+
+class SessionEvalTests(unittest.TestCase):
+    def test_recal_prefix_is_held_out_of_the_test(self):
+        trials = list(range(25))
+        labels = [c for c in SILENT_COMMANDS for _ in range(5)]
+        recal_t, recal_y, test_t, test_y = _split_recal_prefix(trials, labels, 2, 3)
+        self.assertEqual(recal_y, [c for c in SILENT_COMMANDS for _ in range(2)])
+        self.assertEqual(test_y, [c for c in SILENT_COMMANDS for _ in range(3)])
+        self.assertEqual(recal_t, [0, 1, 5, 6, 10, 11, 15, 16, 20, 21])
+        self.assertEqual(test_t, [2, 3, 4, 7, 8, 9, 12, 13, 14, 17, 18, 19, 22, 23, 24])
+
+    def test_later_session_applies_effects_on_the_same_base_draw(self):
+        seed = session_generator_seed(2)
+        plain = SyntheticJawEMG(seed=seed)
+        effects = session_effects(2)
+        pert = SyntheticJawEMG(seed=seed, session=session_effects(2))
+        base, _ = plain.collect(4)
+        got, _ = pert.collect(4)
+        self.assertFalse(np.allclose(base[0], got[0]))
+        expected = effects.apply(base[3], trial_index=3, n_trials=4)
+        self.assertTrue(np.allclose(got[3], expected))
+
+    def test_session_eval_is_repeatable_and_session1_matches_held_out(self):
+        from core_loop import VERSION
+        first = evaluate_sessions(n_sessions=3)
+        second = evaluate_sessions(n_sessions=3)
+        self.assertEqual(first['rows'], second['rows'])
+        held = evaluate()
+        row = first['rows'][0]
+        self.assertEqual(row['session'], 1)
+        self.assertFalse(row['perturbed'])
+        self.assertEqual(row['seed'], EMG_SEED)
+        self.assertEqual(row['no_recal_correct'], held['n_correct'])
+        self.assertEqual(row['n_test'], held['n_test'])
+        self.assertEqual(first['n_recal'], N_RECAL)
+        self.assertEqual(len(first['rows']), 3)
+        for later in first['rows'][1:]:
+            self.assertTrue(later['perturbed'])
+            self.assertEqual(later['n_test'], held['n_test'])
+            self.assertGreaterEqual(later['no_recal_correct'], 0)
+            self.assertLessEqual(later['no_recal_correct'], later['n_test'])
+            self.assertGreaterEqual(later['recal_correct'], 0)
+            self.assertLessEqual(later['recal_correct'], later['n_test'])
+        report = format_session_report(first)
+        self.assertIn('synthetic data, simulated sessions', report)
+        self.assertIn(SYNTHETIC_NOTE, report)
+        self.assertIn(f'recal ({N_RECAL}/class)', report)
+        self.assertIn(f'Tarpluto {VERSION} cross-session robustness', report)
+        self.assertIn('3 labelled trials/class', report)
+
+    def test_rejects_empty_protocol(self):
+        with self.assertRaises(ValueError):
+            evaluate_sessions(n_sessions=0)
+        with self.assertRaises(ValueError):
+            evaluate_sessions(n_recal=0)
 
 
 if __name__ == '__main__':

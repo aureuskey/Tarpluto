@@ -1,4 +1,4 @@
-# Tarpluto - core simulation loop v0.10
+# Tarpluto - core simulation loop v0.11
 # Neural Patch (think-time or MyoWare sensor -> signal) -> Living Node (1000 spiking neurons) -> output
 import argparse
 import json
@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-VERSION = "v0.10"
+VERSION = "v0.11"
 N_NEURONS = 1000
 MEMORY_FILE = 'memory.json'
 FIGURE_FILE = os.path.join('demos', 'tarpluto_loop.png')
@@ -124,7 +124,7 @@ def plot_loop(node, path=FIGURE_FILE, show=True):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Tarpluto v0.10 Patch -> Node simulation')
+    ap = argparse.ArgumentParser(description=f'Tarpluto {VERSION} Patch -> Node simulation')
     ap.add_argument('--demo', action='store_true', help='fixed seed, fresh 1000-neuron start')
     ap.add_argument('--memory', action='store_true', help=f'load/save state in {MEMORY_FILE}')
     ap.add_argument('--ai', action='store_true', help='print one AI line per thought (on in --demo)')

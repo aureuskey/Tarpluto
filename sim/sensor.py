@@ -182,19 +182,138 @@ def _check_templates():
 _check_templates()
 
 
+def _lowpass_cols(x, alpha):
+    """One-pole smoother down the time axis. alpha=0 copies x."""
+    alpha = float(alpha)
+    if alpha <= 0.0:
+        return np.array(x, dtype=float, copy=True)
+    y = np.empty_like(x, dtype=float)
+    y[0] = x[0]
+    keep = 1.0 - alpha
+    for i in range(1, x.shape[0]):
+        y[i] = keep * x[i] + alpha * y[i - 1]
+    return y
+
+
+def _electrode_mix(rng, shift):
+    """Session electrode shift: channel remix plus partial mixing.
+
+    W = (1-s)*I + s*((1-m)*P + m*Leak) with m = 0.5.
+    P is a derangement, so each output takes some other channel's pattern
+    (a gain remix). Leak spreads every channel onto the other three.
+    Output is x @ W. s=0 is not built here; callers keep the trial as-is.
+    """
+    n = N_CHANNELS
+    ident = np.arange(n)
+    perm = rng.permutation(n)
+    guard = 0
+    while np.any(perm == ident):
+        perm = rng.permutation(n)
+        guard += 1
+        if guard > 100:
+            perm = np.roll(ident, 1)
+            break
+    permute = np.zeros((n, n))
+    permute[perm, ident] = 1.0
+    leak = np.full((n, n), 1.0 / (n - 1))
+    np.fill_diagonal(leak, 0.0)
+    mix_weight = 0.5
+    mixed = (1.0 - mix_weight) * permute + mix_weight * leak
+    return (1.0 - shift) * np.eye(n) + shift * mixed
+
+
+class SessionEffects:
+    """Optional simulated session: electrode shift, gain drift, fatigue.
+
+    All strengths default to 0, which leaves the trial array untouched and
+    does not draw random numbers. Nothing here was measured from a sensor.
+    """
+
+    def __init__(self, seed, electrode_shift=0.0, amplitude_drift=0.0,
+                 fatigue_drop=0.0, fatigue_spectral=0.0):
+        self.seed = int(seed)
+        self.electrode_shift = float(electrode_shift)
+        self.amplitude_drift = float(amplitude_drift)
+        self.fatigue_drop = float(fatigue_drop)
+        self.fatigue_spectral = float(fatigue_spectral)
+        if not 0.0 <= self.electrode_shift <= 1.0:
+            raise ValueError('electrode_shift must be between 0 and 1')
+        if self.amplitude_drift < 0.0:
+            raise ValueError('amplitude_drift must be >= 0')
+        if not 0.0 <= self.fatigue_drop <= 1.0:
+            raise ValueError('fatigue_drop must be between 0 and 1')
+        if not 0.0 <= self.fatigue_spectral <= 1.0:
+            raise ValueError('fatigue_spectral must be between 0 and 1')
+        self.mix = np.eye(N_CHANNELS)
+        self.gains = np.ones(N_CHANNELS)
+        if self.electrode_shift > 0.0 or self.amplitude_drift > 0.0:
+            rng = np.random.default_rng(self.seed)
+            if self.electrode_shift > 0.0:
+                self.mix = _electrode_mix(rng, self.electrode_shift)
+            if self.amplitude_drift > 0.0:
+                self.gains = np.clip(
+                    np.exp(rng.normal(0.0, self.amplitude_drift, size=N_CHANNELS)),
+                    0.35, 2.8,
+                )
+
+    def apply(self, emg, trial_index=0, n_trials=1):
+        """Apply this session to one trial.
+
+        trial_index / (n_trials-1) is the fatigue progress, 0 on the first
+        trial of a command and 1 on the last. Electrode shift and amplitude
+        drift are constant for the session. Progress 0 skips fatigue.
+        """
+        emg = np.asarray(emg, dtype=float)
+        if emg.ndim != 2 or emg.shape[1] != N_CHANNELS:
+            raise ValueError(f'expected (*, {N_CHANNELS}) trial, got {emg.shape}')
+        n_trials = int(n_trials)
+        trial_index = int(trial_index)
+        if n_trials < 1:
+            raise ValueError('n_trials must be >= 1')
+        if not 0 <= trial_index < n_trials:
+            raise ValueError('trial_index out of range')
+        active = (
+            self.electrode_shift > 0.0
+            or self.amplitude_drift > 0.0
+            or self.fatigue_drop > 0.0
+            or self.fatigue_spectral > 0.0
+        )
+        if not active:
+            return emg
+        x = emg
+        if self.electrode_shift > 0.0:
+            x = x @ self.mix
+        if self.amplitude_drift > 0.0:
+            x = x * self.gains
+        progress = 0.0 if n_trials == 1 else trial_index / (n_trials - 1)
+        if progress > 0.0 and self.fatigue_drop > 0.0:
+            scale = 1.0 - self.fatigue_drop * progress
+            if scale < 0.05:
+                scale = 0.05
+            x = x * scale
+        if progress > 0.0 and self.fatigue_spectral > 0.0:
+            alpha = self.fatigue_spectral * progress
+            if alpha > 0.95:
+                alpha = 0.95
+            x = _lowpass_cols(x, alpha)
+        return x
+
+
 class SyntheticJawEMG:
     """4-channel synthetic jaw/face EMG trials, one mouthed command each.
 
     The waveform is amplitude-modulated noise plus sensor noise, hum, crosstalk
-    and a linear baseline drift. Labels select TEMPLATES. Nothing here was
-    measured from a sensor.
+    and a linear baseline drift. Labels select TEMPLATES. An optional
+    SessionEffects layer (electrode shift, amplitude drift, fatigue) is off
+    unless `session` is passed. Nothing here was measured from a sensor.
     """
 
-    def __init__(self, seed=EMG_SEED):
+    def __init__(self, seed=EMG_SEED, session=None):
         self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
+        self.session = session
 
-    def trial(self, command):
+    def trial(self, command, trial_index=0, n_trials=1):
         if command not in TEMPLATES:
             names = ', '.join(SILENT_COMMANDS)
             raise ValueError(f'unknown command {command!r}; synthetic commands are {names}')
@@ -222,15 +341,21 @@ class SyntheticJawEMG:
         emg = emg + np.linspace(0.0, 1.0, N_SAMPLES)[:, None] * slope
         hum = self.rng.normal(0.0, HUM_STD, size=N_CHANNELS)
         emg = emg + np.sin(2.0 * np.pi * HUM_HZ * t)[:, None] * hum
+        if self.session is not None:
+            emg = self.session.apply(emg, trial_index=trial_index, n_trials=n_trials)
         return emg
 
     def collect(self, n_per_class, commands=SILENT_COMMANDS):
-        """Trials grouped by command, in `commands` order. One RNG stream."""
+        """Trials grouped by command, in `commands` order. One RNG stream.
+
+        Fatigue, if the session has any, advances with the within-command
+        trial index, so each command sees the same schedule.
+        """
         if n_per_class < 1:
             raise ValueError('n_per_class must be >= 1')
         trials, labels = [], []
         for command in commands:
-            for _ in range(n_per_class):
-                trials.append(self.trial(command))
+            for i in range(n_per_class):
+                trials.append(self.trial(command, trial_index=i, n_trials=n_per_class))
                 labels.append(command)
         return trials, labels
