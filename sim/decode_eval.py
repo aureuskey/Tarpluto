@@ -1,8 +1,10 @@
 # Held-out eval for the synthetic silent-command decoder.
 # Run from the repo root: python3 sim/decode_eval.py
 # Cross-session: python3 sim/decode_eval.py --sessions 4
+# Rest rejection: python3 sim/decode_eval.py --rest
 # Re-run and replace demos/confusion_matrix.png if the generator or features change.
 # Re-run and replace demos/session_accuracy.png if the session protocol changes.
+# Re-run and replace demos/rest_rejection.png if the rest rule changes.
 import argparse
 import os
 
@@ -15,8 +17,10 @@ from core_loop import VERSION
 from decode import (
     SYNTHETIC_NOTE,
     evaluate,
+    evaluate_rest,
     evaluate_sessions,
     format_report,
+    format_rest_report,
     format_session_report,
 )
 
@@ -73,6 +77,30 @@ def save_session_png(result, path):
     return path
 
 
+def save_rest_png(result, path):
+    """Small sweep of the margin percentile. Synthetic data."""
+    sweep = result['sweep']
+    pct = [row['percentile'] for row in sweep]
+    wrong = [row['n_rejected'] / row['n_command'] for row in sweep]
+    false_act = [row['n_false_activation'] / row['n_rest'] for row in sweep]
+    fig, ax = plt.subplots(figsize=(5.0, 3.3))
+    ax.plot(pct, wrong, 'o-', label='wrong rejection')
+    ax.plot(pct, false_act, 's-', label='false activation on rest')
+    ax.axvline(result['percentile'], color='gray', ls='--', lw=1, label='operating point')
+    ax.set_ylim(-0.02, 1.05)
+    pad = 0.4
+    ax.set_xlim(min(pct) - pad, max(pct) + pad)
+    ax.set_xlabel('Training margin percentile')
+    ax.set_ylabel('Rate')
+    ax.set_title(f'Tarpluto {VERSION}\nsynthetic data, no sensor was read')
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    fig.savefig(path, dpi=80)
+    plt.close(fig)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='Held-out and cross-session eval on synthetic 4-channel EMG',
@@ -85,7 +113,25 @@ def main():
                     help='cross-session eval over N simulated sessions (synthetic data)')
     ap.add_argument('--recal', type=int, default=None,
                     help='labelled trials per command used to update centroids (default 3)')
+    ap.add_argument('--rest', action='store_true',
+                    help='idle rejection: command accuracy, wrong rejections, false activations on rest')
     args = ap.parse_args()
+    if args.rest and args.sessions is not None:
+        ap.error('--rest and --sessions are separate evals; run them one at a time')
+    if args.rest:
+        kwargs = {}
+        if args.seed is not None:
+            kwargs['seed'] = args.seed
+        if args.train is not None:
+            kwargs['n_train'] = args.train
+        if args.test is not None:
+            kwargs['n_test'] = args.test
+        result = evaluate_rest(**kwargs)
+        print(format_rest_report(result))
+        out = args.out or os.path.join('demos', 'rest_rejection.png')
+        save_rest_png(result, out)
+        print(f'Saved rest rejection plot to {out}')
+        return
     if args.sessions is not None:
         kwargs = {'n_sessions': args.sessions}
         if args.seed is not None:

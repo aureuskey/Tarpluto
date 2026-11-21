@@ -5,9 +5,9 @@ A software simulation of a non-invasive neural interface loop:
 
 Today the Patch is a proxy: the time you take to think before pressing Enter becomes a signal from 0 to 1. The Living Node turns that signal into spikes, with leak, threshold, refractory period and short-term plasticity (facilitation/depression). No hardware yet.
 
-## Status (v0.11)
+## Status (v0.12)
 
-Software simulation. `python3 sim/decode_eval.py` prints synthetic-data numbers only. No sensor was read. This repo does not report hardware or real-world accuracy. `python3 sim/decode_eval.py --sessions 4` repeats the decoder across simulated sessions (electrode shift, amplitude drift, muscle fatigue), with and without a short recalibration. Synthetic data, simulated sessions.
+Software simulation. `python3 sim/decode_eval.py` prints synthetic-data numbers only. No sensor was read. This repo does not report hardware or real-world accuracy. `python3 sim/decode_eval.py --sessions 4` repeats the decoder across simulated sessions (electrode shift, amplitude drift, muscle fatigue), with and without a short recalibration. Synthetic data, simulated sessions. `python3 sim/decode_eval.py --rest` scores idle rejection on synthetic rest windows: command accuracy with rejection on, the fraction of command windows wrongly rejected, and the false activation rate on held-out rest. Synthetic-data numbers only. No sensor was read.
 
 ## Run
 
@@ -42,6 +42,14 @@ python3 sim/decode_eval.py --sessions 4
 
 Writes `demos/session_accuracy.png`. The checked-in PNG is the output of that command. Synthetic data, simulated sessions. No sensor was read.
 
+Idle rejection, still on synthetic trials. The generator can emit rest windows (sensor noise, 50 Hz hum, baseline drift, occasional small twitches or swallows). The decoder outputs `none` when the margin between the nearest and second-nearest centroid is below a threshold set from the training commands only:
+
+```bash
+python3 sim/decode_eval.py --rest
+```
+
+Prints command accuracy with rejection on, the fraction of command windows wrongly rejected, and the false activation rate on held-out rest windows. Writes `demos/rest_rejection.png`. The checked-in PNG is the output of that command. Synthetic-data numbers only. No sensor was read.
+
 The decoder stays off unless you ask for it. A predicted label does nothing until you type `y`:
 
 ```bash
@@ -49,7 +57,7 @@ python3 sim/core_loop.py --demo --decode
 python3 sim/core_loop.py --source fake4ch
 ```
 
-Type one of the five labels to synthesize that pattern, read the prediction, then `y` to let the predicted command drive the Living Node. Any other reply drops it. Training uses seed 7 (40 trials per label). Each demo session draws further synthetic trials from seed 8. `python3 sim/core_loop.py --demo` does not decode.
+Type one of the five labels to synthesize that pattern, or `rest` for an idle window. Read the prediction (`none` if that window is rejected), then `y` to let a predicted command drive the Living Node. `none` does not act. Any other reply drops a command. Training uses seed 7 (40 trials per label) and sets the rejection margin from those trials. Each demo session draws further synthetic trials from seed 8. `python3 sim/core_loop.py --demo` does not decode.
 
 Tests: `python3 sim/test_decode.py`
 

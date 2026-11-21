@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.12
+
+- Synthetic rest/idle trials: sensor noise, 50 Hz hum, baseline drift, and occasional small non-command twitches or swallows. Fixed seed. Calling the command generator alone is unchanged.
+- Nearest-centroid rejection by the margin between the nearest and second-nearest centroid. The threshold is the 1st percentile of training-command margins. The decoder outputs `none` below that. The threshold uses the training commands only.
+- `python3 sim/decode_eval.py --rest` prints command accuracy with rejection, the wrong-rejection rate, and the false activation rate on held-out rest windows, plus a short threshold sweep, and writes `demos/rest_rejection.png`. Synthetic-data numbers only. No sensor was read.
+- `--decode` prints `none` for a rejected window and does not act on it. A decoded command still acts only after you type `y`.
+- Simulation header, banner and plot title are v0.12.
+
 ## v0.11
 
 - Optional session-level perturbations on the synthetic EMG generator: electrode shift (channel remix and partial mixing), per-channel amplitude drift between sessions, and muscle fatigue (gradual amplitude drop and spectral / zero-crossing change across trials). With the perturbations left off, the generator matches the previous unperturbed trials.

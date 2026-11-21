@@ -1,4 +1,4 @@
-# Tarpluto - core simulation loop v0.11
+# Tarpluto - core simulation loop v0.12
 # Neural Patch (think-time or MyoWare sensor -> signal) -> Living Node (1000 spiking neurons) -> output
 import argparse
 import json
@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-VERSION = "v0.11"
+VERSION = "v0.12"
 N_NEURONS = 1000
 MEMORY_FILE = 'memory.json'
 FIGURE_FILE = os.path.join('demos', 'tarpluto_loop.png')
@@ -149,10 +149,11 @@ def main():
     decoder = online_emg = None
     if args.decode:
         from decode import (
-            N_TRAIN, SYNTHETIC_NOTE, build_decoder, confirm_act, featurize, synthetic_rms_signal,
+            N_TRAIN, REJECT_LABEL, REJECT_MARGIN_PERCENTILE, SYNTHETIC_NOTE,
+            build_decoder, confirm_act, featurize, percentile_phrase, synthetic_rms_signal,
         )
         from sensor import EMG_SEED, ONLINE_SEED, SILENT_COMMANDS, SyntheticJawEMG
-        decoder = build_decoder()
+        decoder = build_decoder(reject=True)
         online_emg = SyntheticJawEMG(seed=ONLINE_SEED)
         patch = None
     elif args.source == 'thinktime':
@@ -168,8 +169,13 @@ def main():
     if args.decode:
         print(f"[Decode] {SYNTHETIC_NOTE}")
         print(f"[Decode] Nearest centroid trained on {N_TRAIN} synthetic trials per command, seed {EMG_SEED}.")
-        print("Type yes, no, help, water, or stop. That word selects a simulated jaw/face EMG pattern.")
-        print("The predicted command acts only after you type y.")
+        print(
+            f"[Decode] Rejection margin threshold {decoder.threshold_:.6f} "
+            f"({percentile_phrase(REJECT_MARGIN_PERCENTILE)} of those training commands). "
+            f"Below that the prediction is '{REJECT_LABEL}'."
+        )
+        print("Type yes, no, help, water, stop, or rest. rest synthesizes an idle window.")
+        print(f"The predicted command acts only after you type y. {REJECT_LABEL} does not act.")
     elif args.source == 'thinktime':
         print("Type a thought. Take longer to think -> stronger signal -> more spikes.")
     else:
@@ -193,13 +199,19 @@ def main():
                 continue
             if args.decode:
                 label = text.lower()
-                if label not in SILENT_COMMANDS:
+                if label == 'rest':
+                    trial = online_emg.rest()
+                elif label not in SILENT_COMMANDS:
                     names = ', '.join(SILENT_COMMANDS)
-                    print(f"[Decode] '{text}' is not a synthetic command. Choose one of: {names}.\n")
+                    print(f"[Decode] '{text}' is not a synthetic command. Choose one of: {names}, or rest.\n")
                     continue
-                trial = online_emg.trial(label)
+                else:
+                    trial = online_emg.trial(label)
                 pred = str(decoder.predict(featurize(trial)[None, :])[0])
                 print(f"[Decode] synthesized '{label}' | predicted '{pred}'")
+                if pred == REJECT_LABEL:
+                    print("[Decode] Rejected as none. No command acted.\n")
+                    continue
                 try:
                     answer = input(f"Act on decoded command '{pred}'? Type y to confirm: ")
                 except EOFError:

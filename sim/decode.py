@@ -37,6 +37,14 @@ SIGNAL_RMS_SCALE = 40.0
 SYNTHETIC_NOTE = 'Synthetic-data numbers only. No sensor was read.'
 FEATURE_KINDS = ('rms', 'mav', 'zc', 'wl')
 
+# Idle rejection. The margin is the second-nearest centroid distance minus
+# the nearest, in the training z-scored feature space. The threshold is this
+# percentile of the training-command margins. It is a fixed rule: the
+# held-out sweep in evaluate_rest does not choose it.
+REJECT_LABEL = 'none'
+REJECT_MARGIN_PERCENTILE = 1.0
+REST_SWEEP_PERCENTILES = (0.0, 1.0, 2.0, 5.0, 10.0)
+
 
 def window_starts(n_samples=N_SAMPLES, win=WIN, hop=HOP):
     if win <= 0 or hop <= 0:
@@ -110,7 +118,12 @@ def confirm_act(answer):
 
 
 class NearestCentroid:
-    """Class mean in z-scored feature space. Predicts the nearest mean."""
+    """Class mean in z-scored feature space. Predicts the nearest mean.
+
+    After calibrate_rejection(), a window whose nearest centroid is not
+    clearly nearer than the runner-up is 'none'. The threshold is a
+    percentile of training margins, not a fit to held-out rest.
+    """
 
     def fit(self, X, y):
         X = np.asarray(X, dtype=float)
@@ -133,6 +146,8 @@ class NearestCentroid:
             cents.append(Xs[y == label].mean(axis=0))
         self.classes_ = np.asarray(classes)
         self.centroids_ = np.vstack(cents)
+        self.threshold_ = None
+        self.reject_percentile_ = None
         return self
 
     def copy(self):
@@ -144,6 +159,8 @@ class NearestCentroid:
         other.scale_ = self.scale_.copy()
         other.classes_ = self.classes_.copy()
         other.centroids_ = self.centroids_.copy()
+        other.threshold_ = self.threshold_
+        other.reject_percentile_ = self.reject_percentile_
         return other
 
     def update_centroids(self, X, y):
@@ -173,13 +190,57 @@ class NearestCentroid:
         self.centroids_ = np.vstack(cents)
         return self
 
+    def _distances(self, X):
+        Xs = (X - self.mean_) / self.scale_
+        return np.linalg.norm(Xs[:, None, :] - self.centroids_[None, :, :], axis=2)
+
+    def nearest_margin(self, X):
+        """Margin (second nearest minus nearest) and the nearest label.
+
+        Both are in the z-scored space from fit(). A large margin means one
+        command is clearly nearer than the others. Needs two classes.
+        """
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X[None, :]
+        if X.ndim != 2 or len(X) == 0:
+            raise ValueError('X must be a non-empty 2-D array')
+        if len(self.classes_) < 2:
+            raise ValueError('margin needs at least two classes')
+        dist = self._distances(X)
+        nearest = np.argmin(dist, axis=1)
+        part = np.partition(dist, 1, axis=1)
+        margin = part[:, 1] - part[:, 0]
+        return margin, self.classes_[nearest]
+
+    def calibrate_rejection(self, X, percentile=REJECT_MARGIN_PERCENTILE):
+        """Set the margin threshold from these trials only.
+
+        Windows with a smaller margin than this percentile of `X` later
+        predict 'none'. `X` is the training commands in the shipped eval.
+        Held-out commands and held-out rest are not passed in.
+        """
+        if not hasattr(self, 'centroids_'):
+            raise ValueError('fit the decoder before calibrating rejection')
+        percentile = float(percentile)
+        if not 0.0 <= percentile <= 100.0:
+            raise ValueError('percentile must be between 0 and 100')
+        margin, _ = self.nearest_margin(X)
+        self.threshold_ = float(np.percentile(margin, percentile, method='linear'))
+        self.reject_percentile_ = percentile
+        return self
+
     def predict(self, X):
         X = np.asarray(X, dtype=float)
         if X.ndim == 1:
             X = X[None, :]
-        Xs = (X - self.mean_) / self.scale_
-        dist = np.linalg.norm(Xs[:, None, :] - self.centroids_[None, :, :], axis=2)
-        return self.classes_[np.argmin(dist, axis=1)]
+        if getattr(self, 'threshold_', None) is None:
+            dist = self._distances(X)
+            return self.classes_[np.argmin(dist, axis=1)]
+        margin, labels = self.nearest_margin(X)
+        out = labels.astype(object)
+        out[margin < self.threshold_] = REJECT_LABEL
+        return out
 
 
 def fit_trials(trials, labels):
@@ -187,10 +248,35 @@ def fit_trials(trials, labels):
     return NearestCentroid().fit(X, labels)
 
 
-def build_decoder(n_per_class=N_TRAIN, seed=EMG_SEED):
-    """Fit on the leading synthetic trials of `seed` (the eval training split)."""
+def build_decoder(n_per_class=N_TRAIN, seed=EMG_SEED, reject=False,
+                  percentile=REJECT_MARGIN_PERCENTILE):
+    """Fit on the leading synthetic trials of `seed` (the eval training split).
+
+    reject=False leaves predict() as a plain nearest centroid. reject=True
+    sets the margin threshold from those same training trials.
+    """
     trials, labels = SyntheticJawEMG(seed=seed).collect(n_per_class)
-    return fit_trials(trials, labels)
+    clf = fit_trials(trials, labels)
+    if reject:
+        clf.calibrate_rejection(
+            np.vstack([featurize(t) for t in trials]), percentile=percentile,
+        )
+    return clf
+
+
+def percentile_phrase(percentile):
+    """'1st percentile' for 1, '2nd percentile' for 2, and so on."""
+    value = float(percentile)
+    if value == int(value):
+        n = int(value)
+        if 10 <= (n % 100) <= 20:
+            suffix = 'th'
+        else:
+            suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+        head = f'{n}{suffix}'
+    else:
+        head = f'{value:g}th'
+    return f'{head} percentile'
 
 
 def confusion_matrix(y_true, y_pred, labels):
@@ -260,6 +346,168 @@ def format_report(result):
     for i, lab in enumerate(labels):
         cells = ' '.join(f'{int(cm[i, j]):>{col_w}d}' for j in range(len(labels)))
         lines.append(f'{lab:>{col_w}} {cells}')
+    return '\n'.join(lines)
+
+
+def _count_rate(k, n):
+    return f'{int(k)}/{int(n)} = {k / n:.3f}'
+
+
+def _rejection_counts(pred, y_true):
+    """Correct label, rejected as none, or a different command."""
+    n_correct = sum(p == y for p, y in zip(pred, y_true))
+    n_rejected = sum(p == REJECT_LABEL for p in pred)
+    n_wrong = len(pred) - n_correct - n_rejected
+    return n_correct, n_rejected, n_wrong
+
+
+def evaluate_rest(
+    n_train=N_TRAIN,
+    n_test=N_TEST,
+    n_rest=None,
+    seed=EMG_SEED,
+    percentile=REJECT_MARGIN_PERCENTILE,
+):
+    """Held-out commands, then rest windows, from one generator.
+
+    The command split matches evaluate(): n_train then n_test on `seed`.
+    Rest windows are drawn after that, so they are not training data.
+    The margin threshold is the given percentile of training-command
+    margins only. The sweep reprints that rule at a few other percentiles.
+    It does not pick the operating point.
+    """
+    n_train = int(n_train)
+    n_test = int(n_test)
+    if n_rest is None:
+        n_rest = n_test * len(SILENT_COMMANDS)
+    n_rest = int(n_rest)
+    percentile = float(percentile)
+    if n_train < 1 or n_test < 1 or n_rest < 1:
+        raise ValueError('n_train, n_test and n_rest must be >= 1')
+
+    emg = SyntheticJawEMG(seed=seed)
+    train_trials, train_labels = emg.collect(n_train)
+    test_trials, test_labels = emg.collect(n_test)
+    rest_trials = emg.collect_rest(n_rest)
+    clf = fit_trials(train_trials, train_labels)
+    X_train = _featurize_trials(train_trials)
+    X_test = _featurize_trials(test_trials)
+    X_rest = _featurize_trials(rest_trials)
+    y_test = [str(y) for y in test_labels]
+
+    open_pred = [str(p) for p in clf.predict(X_test)]
+    clf.calibrate_rejection(X_train, percentile=percentile)
+    pred = [str(p) for p in clf.predict(X_test)]
+    rest_pred = [str(p) for p in clf.predict(X_rest)]
+    n_correct, n_rejected, n_wrong = _rejection_counts(pred, y_test)
+    n_false = sum(p != REJECT_LABEL for p in rest_pred)
+    n_open = sum(p == y for p, y in zip(open_pred, y_test))
+
+    train_margin, _ = clf.nearest_margin(X_train)
+    percents = [float(p) for p in REST_SWEEP_PERCENTILES]
+    if percentile not in percents:
+        percents.append(percentile)
+        percents.sort()
+    sweep = []
+    saved = clf.threshold_
+    try:
+        for p in percents:
+            clf.threshold_ = float(np.percentile(train_margin, p, method='linear'))
+            s_pred = [str(p_) for p_ in clf.predict(X_test)]
+            s_rest = [str(p_) for p_ in clf.predict(X_rest)]
+            s_correct, s_rejected, _ = _rejection_counts(s_pred, y_test)
+            sweep.append({
+                'percentile': p,
+                'threshold': clf.threshold_,
+                'n_correct': s_correct,
+                'n_rejected': s_rejected,
+                'n_false_activation': sum(p_ != REJECT_LABEL for p_ in s_rest),
+                'n_command': len(y_test),
+                'n_rest': len(rest_pred),
+            })
+    finally:
+        clf.threshold_ = saved
+
+    return {
+        'n_correct': n_correct,
+        'n_rejected': n_rejected,
+        'n_wrong_command': n_wrong,
+        'n_command': len(y_test),
+        'n_open_correct': n_open,
+        'n_false_activation': n_false,
+        'n_rest_rejected': len(rest_pred) - n_false,
+        'n_rest': len(rest_pred),
+        'n_train': n_train,
+        'n_test_per_class': n_test,
+        'seed': int(seed),
+        'percentile': percentile,
+        'threshold': float(clf.threshold_),
+        'labels': list(SILENT_COMMANDS),
+        'y_true': y_test,
+        'y_pred': pred,
+        'y_pred_open': open_pred,
+        'sweep': sweep,
+    }
+
+
+def format_rest_report(result):
+    """Rest-rejection numbers. Synthetic trials. No sensor was read."""
+    from core_loop import VERSION
+    n = int(result['n_command'])
+    m = int(result['n_rest'])
+    phrase = percentile_phrase(result['percentile'])
+    lines = [
+        SYNTHETIC_NOTE,
+        f'Tarpluto {VERSION} rest/idle rejection',
+        'Each scored window is one synthetic trial (0.80 s).',
+        'Classifier: nearest centroid, with a margin gate',
+        (
+            'Rule: margin = distance to the second-nearest centroid minus '
+            'distance to the nearest, in the training z-scored feature space. '
+            f"Accept when the margin is at least the {phrase} of "
+            f"training-command margins; otherwise output '{REJECT_LABEL}'."
+        ),
+        (
+            'The threshold is computed from the training commands only. '
+            'It is not fit on the held-out commands or the held-out rest.'
+        ),
+        f"Threshold: {result['threshold']:.6f}",
+        f"Commands: {', '.join(result['labels'])}",
+        (
+            f"Train: {result['n_train']} trials/class | "
+            f"Test: {result['n_test_per_class']} command trials/class | "
+            f"Rest windows: {m} | seed {result['seed']}"
+        ),
+        (
+            'Rest windows are drawn after the command split on that same '
+            'generator: sensor noise, 50 Hz hum, baseline drift, occasional '
+            'small non-command twitches.'
+        ),
+        f"Command accuracy without rejection: {_count_rate(result['n_open_correct'], n)}",
+        f"Command accuracy with rejection: {_count_rate(result['n_correct'], n)}",
+        (
+            'Wrong-rejection rate (command windows predicted none): '
+            f"{_count_rate(result['n_rejected'], n)}"
+        ),
+        f"Accepted but wrong command: {_count_rate(result['n_wrong_command'], n)}",
+        f"False activation rate on rest: {_count_rate(result['n_false_activation'], m)}",
+        '',
+        (
+            'Threshold sweep (training percentiles). The operating point is '
+            f"the {phrase} above, not the best row of this table."
+        ),
+        (
+            f"{'percentile':>10}  {'threshold':>10}  "
+            f"{'command_acc':>16}  {'wrong_reject':>16}  {'false_activation':>16}"
+        ),
+    ]
+    for row in result['sweep']:
+        lines.append(
+            f"{row['percentile']:>10.0f}  {row['threshold']:>10.6f}  "
+            f"{_count_rate(row['n_correct'], row['n_command']):>16}  "
+            f"{_count_rate(row['n_rejected'], row['n_command']):>16}  "
+            f"{_count_rate(row['n_false_activation'], row['n_rest']):>16}"
+        )
     return '\n'.join(lines)
 
 

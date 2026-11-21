@@ -14,15 +14,19 @@ from decode import (
     N_RECAL,
     N_TEST,
     N_TRAIN,
+    REJECT_LABEL,
+    REJECT_MARGIN_PERCENTILE,
     SYNTHETIC_NOTE,
     _split_recal_prefix,
     build_decoder,
     confirm_act,
     evaluate,
+    evaluate_rest,
     evaluate_sessions,
     featurize,
     feature_names,
     format_report,
+    format_rest_report,
     format_session_report,
     n_features,
     session_effects,
@@ -35,7 +39,9 @@ from sensor import (
     N_CHANNELS,
     N_SAMPLES,
     ONLINE_SEED,
+    REST_TWITCH_AMP_HI,
     SILENT_COMMANDS,
+    TEMPLATES,
     SessionEffects,
     SyntheticJawEMG,
 )
@@ -162,7 +168,7 @@ class ClassifierTests(unittest.TestCase):
 
 
 class VersionTests(unittest.TestCase):
-    def test_docs_say_v011_and_not_old_versions(self):
+    def test_docs_say_v012_and_not_old_versions(self):
         paths = [
             os.path.join(ROOT, 'sim', 'core_loop.py'),
             os.path.join(ROOT, 'README.md'),
@@ -177,14 +183,16 @@ class VersionTests(unittest.TestCase):
             self.assertNotIn('v0.4', text)
             self.assertNotIn('v0.8', text)
         core, readme, roadmap, changelog = texts
-        self.assertTrue(core.startswith('# Tarpluto - core simulation loop v0.11\n'))
-        self.assertIn('VERSION = "v0.11"', core)
+        self.assertTrue(core.startswith('# Tarpluto - core simulation loop v0.12\n'))
+        self.assertIn('VERSION = "v0.12"', core)
+        self.assertNotIn('v0.11', core)
         self.assertNotIn('v0.10', core)
         self.assertIn('Tarpluto {VERSION}', core)
-        self.assertIn('v0.11', readme)
-        self.assertIn('v0.11', roadmap)
+        self.assertIn('v0.12', readme)
+        self.assertIn('v0.12', roadmap)
         self.assertIn('synthetic data, simulated sessions', readme.lower())
         self.assertIn('synthetic data, simulated sessions', roadmap.lower())
+        self.assertIn('## v0.12', changelog)
         self.assertIn('## v0.11', changelog)
         self.assertIn('synthetic data, simulated sessions', changelog.lower())
         self.assertIn(SYNTHETIC_NOTE, readme)
@@ -217,7 +225,7 @@ class LoopTests(unittest.TestCase):
     def test_demo_still_runs_without_decoding(self):
         proc = _run_loop(['--demo'], 'quit\n', self.fig)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn('=== Tarpluto v0.11 ===', proc.stdout)
+        self.assertIn('=== Tarpluto v0.12 ===', proc.stdout)
         self.assertIn('Type a thought. Take longer to think', proc.stdout)
         self.assertNotIn('[Decode]', proc.stdout)
         self.assertNotIn('Type y to confirm', proc.stdout)
@@ -238,6 +246,15 @@ class LoopTests(unittest.TestCase):
         self.assertIn('[Living Node]', accepted.stdout)
         self.assertIn('thoughts 1', accepted.stdout)
         self.assertIn('[AI]', accepted.stdout)
+
+    def test_decode_rest_is_none_and_does_not_act(self):
+        proc = _run_loop(['--demo', '--decode'], 'rest\nstatus\nquit\n', self.fig)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("synthesized 'rest' | predicted 'none'", proc.stdout)
+        self.assertIn('Rejected as none. No command acted.', proc.stdout)
+        self.assertIn('thoughts 0', proc.stdout)
+        self.assertNotIn('[Living Node]', proc.stdout)
+        self.assertNotIn('Type y to confirm', proc.stdout)
 
     def test_fake4ch_is_the_decoder(self):
         proc = _run_loop(['--source', 'fake4ch'], 'stop\ny\nquit\n', self.fig)
@@ -273,6 +290,7 @@ class EvalScriptTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             report = format_report(evaluate())
             self.assertIn(report, proc.stdout)
+            self.assertNotIn('False activation rate on rest', proc.stdout)
             self.assertIn(f'Saved confusion matrix to {out}', proc.stdout)
             with open(out, 'rb') as f:
                 self.assertEqual(f.read(8), b'\x89PNG\r\n\x1a\n')
@@ -297,10 +315,50 @@ class EvalScriptTests(unittest.TestCase):
             report = format_session_report(evaluate_sessions(n_sessions=3))
             self.assertIn(report, proc.stdout)
             self.assertIn('synthetic data, simulated sessions', proc.stdout)
+            self.assertNotIn('False activation rate on rest', proc.stdout)
             self.assertIn(f'Saved session accuracy plot to {out}', proc.stdout)
             self.assertLess(os.path.getsize(out), 200_000)
             with open(out, 'rb') as f:
                 self.assertEqual(f.read(8), b'\x89PNG\r\n\x1a\n')
+
+    def test_rest_script_prints_report_and_small_png(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, 'rest.png')
+            env = os.environ.copy()
+            env['MPLBACKEND'] = 'Agg'
+            proc = subprocess.run(
+                [sys.executable, os.path.join(ROOT, 'sim', 'decode_eval.py'), '--rest', '--out', out],
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                env=env,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = format_rest_report(evaluate_rest())
+            self.assertIn(report, proc.stdout)
+            self.assertIn(SYNTHETIC_NOTE, proc.stdout)
+            self.assertIn(f'Saved rest rejection plot to {out}', proc.stdout)
+            self.assertLess(os.path.getsize(out), 200_000)
+            with open(out, 'rb') as f:
+                self.assertEqual(f.read(8), b'\x89PNG\r\n\x1a\n')
+
+    def test_rest_and_sessions_are_not_combined(self):
+        env = os.environ.copy()
+        env['MPLBACKEND'] = 'Agg'
+        proc = subprocess.run(
+            [
+                sys.executable, os.path.join(ROOT, 'sim', 'decode_eval.py'),
+                '--rest', '--sessions', '2',
+            ],
+            text=True,
+            capture_output=True,
+            cwd=ROOT,
+            env=env,
+            timeout=60,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('separate evals', proc.stderr)
 
 
 class PerturbationTests(unittest.TestCase):
@@ -431,6 +489,214 @@ class SessionEvalTests(unittest.TestCase):
             evaluate_sessions(n_sessions=0)
         with self.assertRaises(ValueError):
             evaluate_sessions(n_recal=0)
+
+
+def _rms(trial):
+    return float(np.sqrt(np.mean(np.asarray(trial, dtype=float) ** 2)))
+
+
+class RestGeneratorTests(unittest.TestCase):
+    def test_shape_seed_and_finite(self):
+        first = SyntheticJawEMG(seed=11).collect_rest(4)
+        second = SyntheticJawEMG(seed=11).collect_rest(4)
+        self.assertEqual(len(first), 4)
+        for a, b in zip(first, second):
+            self.assertEqual(a.shape, (N_SAMPLES, N_CHANNELS))
+            self.assertTrue(np.all(np.isfinite(a)))
+            self.assertTrue(np.array_equal(a, b))
+        self.assertFalse(np.array_equal(first[0], first[1]))
+
+    def test_fixed_seed_ignores_global_numpy_seed(self):
+        np.random.seed(0)
+        left = SyntheticJawEMG(seed=5).rest()
+        np.random.seed(1)
+        right = SyntheticJawEMG(seed=5).rest()
+        self.assertTrue(np.array_equal(left, right))
+
+    def test_rest_is_not_a_command_template(self):
+        for name in ('rest', 'none', 'idle'):
+            with self.assertRaises(ValueError):
+                SyntheticJawEMG(seed=1).trial(name)
+
+    def test_calling_trial_only_does_not_draw_rest(self):
+        plain = SyntheticJawEMG(seed=9)
+        other = SyntheticJawEMG(seed=9)
+        self.assertTrue(np.array_equal(plain.trial('yes'), other.trial('yes')))
+        self.assertTrue(np.array_equal(plain.trial('stop'), other.trial('stop')))
+        mixed = SyntheticJawEMG(seed=9)
+        mixed.rest()
+        self.assertFalse(np.array_equal(mixed.trial('yes'), SyntheticJawEMG(seed=9).trial('yes')))
+
+    def test_rest_is_quieter_than_commands_and_not_flat(self):
+        commands, _ = SyntheticJawEMG(seed=EMG_SEED).collect(4)
+        rest = SyntheticJawEMG(seed=EMG_SEED).collect_rest(40)
+        cmd_rms = np.array([_rms(t) for t in commands])
+        rest_rms = np.array([_rms(t) for t in rest])
+        self.assertLess(float(rest_rms.mean()), float(cmd_rms.mean()) * 0.5)
+        self.assertLess(float(rest_rms.max()), float(cmd_rms.min()))
+        self.assertGreater(float(rest_rms.max() - rest_rms.min()), 0.5)
+        min_command_amp = min(amp for bumps in TEMPLATES.values() for *_, amp in bumps)
+        self.assertLess(REST_TWITCH_AMP_HI, min_command_amp)
+
+    def test_collect_rest_rejects_empty(self):
+        with self.assertRaises(ValueError):
+            SyntheticJawEMG(seed=1).collect_rest(0)
+
+
+class RejectionTests(unittest.TestCase):
+    def test_unset_threshold_still_labels_the_midpoint(self):
+        from decode import NearestCentroid
+        X = np.array([
+            [0.0, 0.0],
+            [0.2, -0.1],
+            [0.1, 0.2],
+            [8.0, 0.0],
+            [8.1, 0.2],
+            [7.9, -0.1],
+        ])
+        y = np.array(['a', 'a', 'a', 'b', 'b', 'b'])
+        clf = NearestCentroid().fit(X, y)
+        self.assertIsNone(clf.threshold_)
+        mid = np.array([[4.0, 0.0]])
+        self.assertIn(str(clf.predict(mid)[0]), ('a', 'b'))
+        self.assertNotEqual(str(clf.predict(mid)[0]), REJECT_LABEL)
+
+    def test_margin_gate_keeps_a_centroid_and_rejects_the_middle(self):
+        from decode import NearestCentroid
+        X = np.array([
+            [0.0, 0.0],
+            [0.2, -0.1],
+            [0.1, 0.2],
+            [8.0, 0.0],
+            [8.1, 0.2],
+            [7.9, -0.1],
+        ])
+        y = np.array(['a', 'a', 'a', 'b', 'b', 'b'])
+        clf = NearestCentroid().fit(X, y)
+        mid = np.array([[4.0, 0.0]])
+        home = np.array([[0.0, 0.0]])
+        m_mid, _ = clf.nearest_margin(mid)
+        m_home, lab_home = clf.nearest_margin(home)
+        self.assertEqual(str(lab_home[0]), 'a')
+        self.assertLess(float(m_mid[0]), float(m_home[0]))
+        clf.threshold_ = float((m_mid[0] + m_home[0]) / 2.0)
+        self.assertEqual(str(clf.predict(home)[0]), 'a')
+        self.assertEqual(str(clf.predict(mid)[0]), REJECT_LABEL)
+        copied = clf.copy()
+        self.assertEqual(copied.threshold_, clf.threshold_)
+        self.assertEqual(str(copied.predict(mid)[0]), REJECT_LABEL)
+        fresh = NearestCentroid().fit(X, y)
+        self.assertIsNone(fresh.threshold_)
+        self.assertNotEqual(str(fresh.predict(mid)[0]), REJECT_LABEL)
+
+    def test_threshold_is_the_training_percentile_only(self):
+        from decode import NearestCentroid
+        X = np.array([
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [6.0, 0.0],
+            [6.1, 0.0],
+            [6.0, 0.2],
+        ], dtype=float)
+        y = np.array(['a', 'a', 'a', 'b', 'b', 'b'])
+        clf = NearestCentroid().fit(X, y)
+        before = clf.centroids_.copy()
+        clf.calibrate_rejection(X, percentile=1.0)
+        margin, _ = clf.nearest_margin(X)
+        expected = float(np.percentile(margin, 1.0, method='linear'))
+        self.assertEqual(clf.threshold_, expected)
+        self.assertEqual(clf.reject_percentile_, 1.0)
+        self.assertTrue(np.array_equal(clf.centroids_, before))
+        # A second calibration on the same rows does not look at other points.
+        other = np.array([[100.0, 100.0], [-100.0, 50.0]])
+        again = NearestCentroid().fit(X, y).calibrate_rejection(X, percentile=1.0)
+        self.assertEqual(again.threshold_, clf.threshold_)
+        self.assertNotEqual(
+            NearestCentroid().fit(np.vstack([X, other]), np.array(['a', 'a', 'a', 'b', 'b', 'b', 'a', 'b'])).calibrate_rejection(
+                np.vstack([X, other]), percentile=1.0,
+            ).threshold_,
+            clf.threshold_,
+        )
+
+    def test_calibrate_rejects_bad_input(self):
+        from decode import NearestCentroid
+        clf = NearestCentroid()
+        with self.assertRaises(ValueError):
+            clf.calibrate_rejection(np.zeros((2, 2)))
+        X = np.array([[0.0, 0.0], [1.0, 1.0], [8.0, 0.0], [9.0, 0.1]])
+        y = np.array(['a', 'a', 'b', 'b'])
+        fitted = NearestCentroid().fit(X, y)
+        with self.assertRaises(ValueError):
+            fitted.calibrate_rejection(X, percentile=101)
+        with self.assertRaises(ValueError):
+            fitted.calibrate_rejection(np.zeros((0, 2)))
+
+
+class RestEvalTests(unittest.TestCase):
+    def test_rest_eval_matches_open_decoder_and_accounts(self):
+        first = evaluate_rest()
+        second = evaluate_rest()
+        held = evaluate()
+        self.assertEqual(first['y_true'], second['y_true'])
+        self.assertEqual(first['y_pred'], second['y_pred'])
+        self.assertEqual(first['y_pred_open'], held['y_pred'])
+        self.assertEqual(first['y_true'], held['y_true'])
+        self.assertEqual(first['threshold'], second['threshold'])
+        n = first['n_command']
+        self.assertEqual(
+            first['n_correct'] + first['n_rejected'] + first['n_wrong_command'],
+            n,
+        )
+        self.assertEqual(first['n_false_activation'] + first['n_rest_rejected'], first['n_rest'])
+        self.assertEqual(first['n_rest'], n)
+        self.assertEqual(first['n_command'], held['n_test'])
+        self.assertGreaterEqual(first['n_correct'] / n, 0.9)
+        self.assertLessEqual(first['n_rejected'] / n, 0.1)
+        self.assertEqual(first['n_false_activation'], 0)
+        self.assertEqual(first['percentile'], REJECT_MARGIN_PERCENTILE)
+        op = [row for row in first['sweep'] if row['percentile'] == first['percentile']]
+        self.assertEqual(len(op), 1)
+        self.assertEqual(op[0]['threshold'], first['threshold'])
+        self.assertEqual(op[0]['n_correct'], first['n_correct'])
+        self.assertEqual(op[0]['n_rejected'], first['n_rejected'])
+        self.assertEqual(op[0]['n_false_activation'], first['n_false_activation'])
+        # The gate is the 1st percentile of the training margins, not the test set.
+        emg = SyntheticJawEMG(seed=EMG_SEED)
+        train, _ = emg.collect(N_TRAIN)
+        from decode import fit_trials
+        clf = fit_trials(train, _)
+        X = np.vstack([featurize(t) for t in train])
+        margin, _ = clf.nearest_margin(X)
+        expected = float(np.percentile(margin, REJECT_MARGIN_PERCENTILE, method='linear'))
+        self.assertEqual(first['threshold'], expected)
+        report = format_rest_report(first)
+        self.assertIn(SYNTHETIC_NOTE, report)
+        self.assertIn('training commands only', report)
+        self.assertIn(f"Command accuracy with rejection: {first['n_correct']}/{n}", report)
+        self.assertIn(
+            f"Wrong-rejection rate (command windows predicted none): {first['n_rejected']}/{n}",
+            report,
+        )
+        self.assertIn(
+            f"False activation rate on rest: {first['n_false_activation']}/{first['n_rest']}",
+            report,
+        )
+        self.assertIn(f"Threshold: {first['threshold']:.6f}", report)
+        self.assertIn('1st percentile', report)
+
+    def test_online_yes_is_accepted_and_online_rest_is_none(self):
+        clf = build_decoder(reject=True)
+        self.assertIsNone(build_decoder().threshold_)
+        yes = SyntheticJawEMG(seed=ONLINE_SEED).trial('yes')
+        idle = SyntheticJawEMG(seed=ONLINE_SEED).rest()
+        self.assertEqual(str(clf.predict(featurize(yes)[None, :])[0]), 'yes')
+        self.assertEqual(str(clf.predict(featurize(idle)[None, :])[0]), REJECT_LABEL)
+        self.assertEqual(clf.threshold_, evaluate_rest()['threshold'])
+
+    def test_rejects_empty_rest_protocol(self):
+        with self.assertRaises(ValueError):
+            evaluate_rest(n_rest=0)
 
 
 if __name__ == '__main__':

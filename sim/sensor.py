@@ -121,6 +121,18 @@ TRIAL_SCALE_STD = 0.05   # one gain shared by all channels in a trial
 CROSSTALK = 0.10         # fraction of each channel mixed in from the others
 MAX_SHIFT = int(round(0.03 * FS))  # ±30 ms envelope shift
 
+# Rest / idle. Same sensor floor as a command (noise, hum, drift, crosstalk).
+# Some trials add a short twitch or swallow. Twitch amplitude is the std of
+# the noise carrier, the same unit as TEMPLATES, and stays below the
+# smallest command bump (25).
+REST_TWITCH_P = 0.35
+REST_MAX_TWITCHES = 2
+REST_TWITCH_AMP_LO = 8.0
+REST_TWITCH_AMP_HI = 18.0
+REST_TWITCH_SIGMA_LO = 0.02
+REST_TWITCH_SIGMA_HI = 0.04
+REST_TWITCH_EDGE_S = 0.10
+
 # Bumps: (channel, center_s, sigma_s, peak amplitude). Peak amplitude is the
 # standard deviation of the noise carrier at the center of the bump.
 TEMPLATES = {
@@ -303,9 +315,11 @@ class SyntheticJawEMG:
     """4-channel synthetic jaw/face EMG trials, one mouthed command each.
 
     The waveform is amplitude-modulated noise plus sensor noise, hum, crosstalk
-    and a linear baseline drift. Labels select TEMPLATES. An optional
-    SessionEffects layer (electrode shift, amplitude drift, fatigue) is off
-    unless `session` is passed. Nothing here was measured from a sensor.
+    and a linear baseline drift. Labels select TEMPLATES. rest() is an idle
+    window on that same sensor floor, plus occasional small twitches, and it
+    draws from this generator's RNG. An optional SessionEffects layer
+    (electrode shift, amplitude drift, fatigue) is off unless `session` is
+    passed. Nothing here was measured from a sensor.
     """
 
     def __init__(self, seed=EMG_SEED, session=None):
@@ -344,6 +358,52 @@ class SyntheticJawEMG:
         if self.session is not None:
             emg = self.session.apply(emg, trial_index=trial_index, n_trials=n_trials)
         return emg
+
+    def rest(self, trial_index=0, n_trials=1):
+        """One idle trial. Advances the same RNG as trial().
+
+        Sensor noise, 50 Hz hum and a linear baseline drift are always there.
+        With probability REST_TWITCH_P the trial also has 1..REST_MAX_TWITCHES
+        short low-amplitude bumps (a swallow or a stray contraction). Those
+        bumps are not command templates. A caller who only calls trial() does
+        not draw them, so command trials stay on the previous stream.
+        """
+        rng = self.rng
+        t = np.arange(N_SAMPLES) / FS
+        env = np.zeros((N_SAMPLES, N_CHANNELS))
+        n_twitch = 0
+        if rng.random() < REST_TWITCH_P:
+            n_twitch = int(rng.integers(1, REST_MAX_TWITCHES + 1))
+        for _ in range(n_twitch):
+            ch = int(rng.integers(0, N_CHANNELS))
+            center = float(rng.uniform(REST_TWITCH_EDGE_S, TRIAL_S - REST_TWITCH_EDGE_S))
+            sigma = float(rng.uniform(REST_TWITCH_SIGMA_LO, REST_TWITCH_SIGMA_HI))
+            amp = float(rng.uniform(REST_TWITCH_AMP_LO, REST_TWITCH_AMP_HI))
+            env[:, ch] += amp * np.exp(-0.5 * ((t - center) / sigma) ** 2)
+        if n_twitch:
+            trial_gain = float(np.clip(rng.normal(1.0, TRIAL_SCALE_STD), 0.7, 1.3))
+            ch_gain = np.clip(rng.normal(1.0, GAIN_STD, size=N_CHANNELS), 0.45, 1.7)
+            env = env * (trial_gain * ch_gain)
+            emg = env * rng.normal(0.0, 1.0, size=env.shape)
+        else:
+            emg = np.zeros((N_SAMPLES, N_CHANNELS))
+        # Same sensor floor, in the same order, as trial().
+        emg = emg + rng.normal(0.0, NOISE_STD, size=emg.shape)
+        emg = emg @ MIX
+        slope = rng.normal(0.0, DRIFT_STD, size=N_CHANNELS)
+        emg = emg + np.linspace(0.0, 1.0, N_SAMPLES)[:, None] * slope
+        hum = rng.normal(0.0, HUM_STD, size=N_CHANNELS)
+        emg = emg + np.sin(2.0 * np.pi * HUM_HZ * t)[:, None] * hum
+        if self.session is not None:
+            emg = self.session.apply(emg, trial_index=trial_index, n_trials=n_trials)
+        return emg
+
+    def collect_rest(self, n):
+        """n idle trials from this generator, in order."""
+        n = int(n)
+        if n < 1:
+            raise ValueError('n must be >= 1')
+        return [self.rest(trial_index=i, n_trials=n) for i in range(n)]
 
     def collect(self, n_per_class, commands=SILENT_COMMANDS):
         """Trials grouped by command, in `commands` order. One RNG stream.
